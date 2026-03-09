@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import streamlit as st
@@ -8,6 +9,7 @@ from sanitizer.loader import load_all
 from sanitizer.analyzer import analyze
 from sanitizer.synthesizer import synthesize
 from sanitizer.ui import (
+    _validate_folder_path,
     get_folder_from_args,
     init_session_state,
     render_folder_selector,
@@ -20,6 +22,8 @@ from sanitizer.ui import (
     render_synthesis_controls,
     render_output_section,
 )
+
+logging.basicConfig(level=logging.WARNING, format="%(name)s: %(message)s")
 
 
 def main():
@@ -39,14 +43,16 @@ def main():
         folder_path = render_folder_selector()
 
         if folder_path and st.button("Load & Analyze", type="primary"):
-            folder = Path(folder_path)
-            if not folder.exists():
-                st.error(f"Folder not found: {folder_path}")
+            folder = _validate_folder_path(folder_path)
+            if folder is None:
+                return
+            if not folder.is_dir():
+                st.error(f"Not a directory: {folder}")
                 return
 
-            with st.spinner("Loading Excel files..."):
+            with st.spinner("Loading Excel files (searching subdirectories)..."):
                 try:
-                    polars_dfs, pandas_dfs, table_sources = load_all(folder)
+                    polars_dfs, pandas_dfs, table_sources, table_relative_dirs = load_all(folder)
                 except Exception as e:
                     st.error(f"Failed to load: {e}")
                     return
@@ -54,7 +60,7 @@ def main():
             st.success(f"Loaded {len(polars_dfs)} table(s)")
 
             with st.spinner("Analyzing metadata..."):
-                analysis = analyze(polars_dfs, pandas_dfs, table_sources)
+                analysis = analyze(polars_dfs, table_sources, table_relative_dirs)
 
             init_session_state(analysis, pandas_dfs)
             st.session_state.phase = "review"
@@ -70,8 +76,10 @@ def main():
 
         st.divider()
 
-        for table_name in analysis.tables:
-            with st.expander(f"Table: {table_name}", expanded=False):
+        for table_name, table_meta in analysis.tables.items():
+            rel = table_meta.relative_dir
+            label = f"Table: {rel}/{table_name}" if rel else f"Table: {table_name}"
+            with st.expander(label, expanded=False):
                 render_table_detail(table_name, analysis, pandas_dfs[table_name])
                 render_data_preview(table_name, pandas_dfs[table_name])
 
@@ -99,26 +107,35 @@ def main():
         analysis = st.session_state.analysis
         pandas_dfs = st.session_state.pandas_dfs
         scale = st.session_state.get("scale", 1.0)
+        seed_val = st.session_state.get("seed", 0)
+        seed = seed_val if seed_val != 0 else None
 
         progress_bar = st.progress(0.0, text="Starting synthesis...")
+        warning_container = st.container()
 
         def progress_callback(pct: float, msg: str):
             progress_bar.progress(min(pct, 1.0), text=msg)
+
+        def warning_callback(msg: str):
+            warning_container.warning(msg)
 
         try:
             synthetic_data = synthesize(
                 analysis=analysis,
                 pandas_dfs=pandas_dfs,
                 scale=scale,
+                seed=seed,
                 progress_callback=progress_callback,
+                warning_callback=warning_callback,
             )
             st.session_state.synthetic_data = synthetic_data
             st.session_state.phase = "done"
             st.rerun()
         except Exception as e:
             st.error(f"Synthesis failed: {e}")
-            import traceback
-            st.code(traceback.format_exc())
+            with st.expander("Show traceback (debug)"):
+                import traceback
+                st.code(traceback.format_exc())
             if st.button("Back to Review"):
                 st.session_state.phase = "review"
                 st.rerun()
@@ -127,7 +144,7 @@ def main():
     # ── DONE ────────────────────────────────────────────────────────────────
     if st.session_state.phase == "done":
         st.success("Synthetic data generated successfully!")
-        render_output_section(st.session_state.synthetic_data)
+        render_output_section(st.session_state.synthetic_data, st.session_state.analysis)
 
         st.divider()
         if st.button("Back to Review"):

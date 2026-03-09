@@ -2,15 +2,15 @@
 name = "sanitizer"
 version = "0.1.0"
 description = "Synthetic data generator with auto-detected relational metadata"
-requires-python = ">=3.14"
+requires-python = ">=3.11"
 dependencies = [
-    "streamlit>=1.38.0",
-    "polars>=1.0.0",
-    "fastexcel>=0.11.0",
-    "pandas>=2.0.0",
-    "sdv>=1.17.0",
-    "faker>=28.0.0",
-    "openpyxl>=3.1.0",
+    "streamlit>=1.38.0,<2",
+    "polars>=1.0.0,<2",
+    "fastexcel>=0.11.0,<2",
+    "pandas>=2.0.0,<3",
+    "sdv>=1.17.0,<2",
+    "faker>=28.0.0,<40",
+    "openpyxl>=3.1.0,<4",
 ]
 
 [build-system]

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
+from typing import Any
 
 
 class ColumnRole(str, Enum):
@@ -21,10 +21,10 @@ class ColumnMeta:
     sdtype: str  # SDV sdtype: "id", "numerical", "datetime", "categorical", "boolean", "unknown"
     role: ColumnRole
     is_primary_key: bool = False
-    foreign_key_target: Optional[str] = None  # "parent_table.column" if FK
+    foreign_key_target: str | None = None  # "parent_table.column" if FK
     uniqueness_ratio: float = 0.0
-    datetime_format: Optional[str] = None  # e.g. "%Y-%m-%d" for SDV
-    sample_values: list = field(default_factory=list)
+    datetime_format: str | None = None  # e.g. "%Y-%m-%d" for SDV
+    sample_values: list[Any] = field(default_factory=list)
 
 
 @dataclass
@@ -58,7 +58,8 @@ class TableMeta:
     file_path: str
     row_count: int
     columns: dict[str, ColumnMeta] = field(default_factory=dict)
-    primary_key: Optional[str] = None
+    primary_key: str | None = None
+    relative_dir: str = ""  # subdirectory relative to the root input folder (posix style)
 
 
 @dataclass

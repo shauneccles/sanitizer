@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import logging
-from typing import Callable, Optional
+from typing import Callable
 
+import numpy as np
 import pandas as pd
 from faker import Faker
 from sdv.cag import FixedCombinations, Inequality
@@ -35,8 +36,14 @@ _FAKER_DISPATCH: list[tuple[list[str], Callable[[], str]]] = [
 
 def _faker_for_column(col_name: str) -> Callable[[], str]:
     col_lower = col_name.lower()
+    # Split on underscores/spaces to get word segments for matching
+    segments = set(col_lower.replace(" ", "_").split("_"))
+
+    # Exact full-name match first, then segment-level match
     for patterns, generator in _FAKER_DISPATCH:
-        if col_lower in patterns or any(p in col_lower for p in patterns):
+        if col_lower in patterns:
+            return generator
+        if segments & set(patterns):
             return generator
     return lambda: fake.sentence(nb_words=6)
 
@@ -55,7 +62,13 @@ def _prepare_clean_data(
 def build_sdv_metadata(
     analysis: AnalysisResult,
     clean_data: dict[str, pd.DataFrame],
+    warn: Callable[[str], None] | None = None,
 ) -> Metadata:
+    def _warn(msg: str):
+        logger.warning(msg)
+        if warn:
+            warn(msg)
+
     # Use the new Metadata class (not deprecated MultiTableMetadata)
     # infer_keys=None so we supply our own PKs/FKs
     metadata = Metadata.detect_from_dataframes(data=clean_data, infer_keys=None)
@@ -69,7 +82,7 @@ def build_sdv_metadata(
                     table_name=table_name,
                 )
             except Exception as e:
-                logger.warning("Failed to set PK %s.%s: %s", table_name, table_meta.primary_key, e)
+                _warn(f"Failed to set PK {table_name}.{table_meta.primary_key}: {e}")
 
         # Update column sdtypes for non-text columns that are in clean_data
         for col_name, col_meta in table_meta.columns.items():
@@ -87,7 +100,7 @@ def build_sdv_metadata(
                     **kwargs,
                 )
             except Exception as e:
-                logger.warning("Failed to update column %s.%s: %s", table_name, col_name, e)
+                _warn(f"Failed to update column {table_name}.{col_name}: {e}")
 
     # Add relationships
     for rel in analysis.relationships:
@@ -99,26 +112,39 @@ def build_sdv_metadata(
                 child_foreign_key=rel.child_column,
             )
         except Exception as e:
-            logger.warning("Failed to add relationship %s->%s: %s", rel.parent_table, rel.child_table, e)
+            _warn(f"Failed to add relationship {rel.parent_table}->{rel.child_table}: {e}")
 
     return metadata
 
 
-def build_constraints(analysis: AnalysisResult) -> list:
-    constraints = []
+def build_constraints(
+    analysis: AnalysisResult,
+) -> tuple[list, dict[str, list]]:
+    """Build SDV constraints.
+
+    Returns:
+        (all_constraints, constraints_by_table) — flat list for multi-table
+        synthesis and per-table grouping for single-table synthesis.
+    """
+    all_constraints: list = []
+    by_table: dict[str, list] = {}
     for pair in analysis.date_constraints:
-        constraints.append(Inequality(
+        c = Inequality(
             low_column_name=pair.low_column,
             high_column_name=pair.high_column,
             strict_boundaries=pair.strict,
             table_name=pair.table_name,
-        ))
+        )
+        all_constraints.append(c)
+        by_table.setdefault(pair.table_name, []).append(c)
     for group in analysis.dimension_groups:
-        constraints.append(FixedCombinations(
+        c = FixedCombinations(
             column_names=group.column_names,
             table_name=group.table_name,
-        ))
-    return constraints
+        )
+        all_constraints.append(c)
+        by_table.setdefault(group.table_name, []).append(c)
+    return all_constraints, by_table
 
 
 def _get_text_columns_by_table(analysis: AnalysisResult) -> dict[str, list[str]]:
@@ -154,11 +180,23 @@ def synthesize(
     analysis: AnalysisResult,
     pandas_dfs: dict[str, pd.DataFrame],
     scale: float = 1.0,
-    progress_callback: Optional[Callable[[float, str], None]] = None,
+    seed: int | None = None,
+    progress_callback: Callable[[float, str], None] | None = None,
+    warning_callback: Callable[[str], None] | None = None,
 ) -> dict[str, pd.DataFrame]:
     def _progress(pct: float, msg: str):
         if progress_callback:
             progress_callback(pct, msg)
+
+    def _warn(msg: str):
+        logger.warning(msg)
+        if warning_callback:
+            warning_callback(msg)
+
+    # Set seeds for reproducibility
+    if seed is not None:
+        Faker.seed(seed)
+        np.random.seed(seed)
 
     _progress(0.05, "Identifying text columns...")
     text_columns_by_table = _get_text_columns_by_table(analysis)
@@ -167,16 +205,16 @@ def synthesize(
     clean_data = _prepare_clean_data(pandas_dfs, text_columns_by_table)
 
     _progress(0.10, "Building SDV metadata...")
-    metadata = build_sdv_metadata(analysis, clean_data)
+    metadata = build_sdv_metadata(analysis, clean_data, _warn)
 
     _progress(0.15, "Building constraints...")
-    constraints = build_constraints(analysis)
+    all_constraints, constraints_by_table = build_constraints(analysis)
 
     _progress(0.20, "Validating metadata...")
     try:
         metadata.validate()
     except Exception as e:
-        logger.warning("Metadata validation warning: %s", e)
+        _warn(f"Metadata validation warning: {e}")
 
     has_relationships = len(analysis.relationships) > 0
     n_tables = len(analysis.tables)
@@ -185,18 +223,18 @@ def synthesize(
         _progress(0.25, "Fitting multi-table synthesizer (HMA)...")
         try:
             synthetic_data = _synthesize_multi_table(
-                metadata, clean_data, constraints, scale, _progress,
+                metadata, clean_data, all_constraints, scale, _progress, _warn,
             )
         except Exception as e:
-            logger.warning("HMA synthesis failed (%s), falling back to per-table synthesis", e)
+            _warn(f"HMA synthesis failed ({e}), falling back to per-table synthesis")
             _progress(0.30, "Falling back to per-table synthesis...")
             synthetic_data = _synthesize_single_tables(
-                metadata, clean_data, constraints, scale, _progress,
+                metadata, clean_data, constraints_by_table, scale, _progress, _warn,
             )
     else:
         _progress(0.25, "Fitting per-table synthesizers...")
         synthetic_data = _synthesize_single_tables(
-            metadata, clean_data, constraints, scale, _progress,
+            metadata, clean_data, constraints_by_table, scale, _progress, _warn,
         )
 
     _progress(0.88, "Stitching foreign key references...")
@@ -214,7 +252,6 @@ def _stitch_foreign_keys(
     synthetic_data: dict[str, pd.DataFrame],
 ) -> dict[str, pd.DataFrame]:
     """Replace FK columns in child tables with valid parent PK values."""
-    import numpy as np
 
     for rel in analysis.relationships:
         parent_table = rel.parent_table
@@ -247,13 +284,14 @@ def _synthesize_multi_table(
     constraints: list,
     scale: float,
     _progress: Callable[[float, str], None],
+    _warn: Callable[[str], None],
 ) -> dict[str, pd.DataFrame]:
     synth = HMASynthesizer(metadata=metadata, verbose=True)
     if constraints:
         try:
             synth.add_constraints(constraints)
         except Exception as e:
-            logger.warning("Failed to add constraints: %s", e)
+            _warn(f"Failed to add constraints: {e}")
     _progress(0.35, "Fitting HMA synthesizer (this may take a while)...")
     synth.fit(clean_data)
     _progress(0.75, "Sampling synthetic data...")
@@ -263,9 +301,10 @@ def _synthesize_multi_table(
 def _synthesize_single_tables(
     metadata: Metadata,
     clean_data: dict[str, pd.DataFrame],
-    constraints: list,
+    constraints_by_table: dict[str, list],
     scale: float,
     _progress: Callable[[float, str], None],
+    _warn: Callable[[str], None],
 ) -> dict[str, pd.DataFrame]:
     table_names = list(clean_data.keys())
     synthetic_data: dict[str, pd.DataFrame] = {}
@@ -279,16 +318,12 @@ def _synthesize_single_tables(
         n_rows = max(1, int(len(df) * scale))
 
         synth = GaussianCopulaSynthesizer(metadata=table_meta)
-        # Add table-specific constraints
-        table_constraints = [
-            c for c in constraints
-            if getattr(c, "_table_name", None) == table_name
-        ]
+        table_constraints = constraints_by_table.get(table_name, [])
         if table_constraints:
             try:
                 synth.add_constraints(table_constraints)
             except Exception as e:
-                logger.warning("Failed to add constraints for %s: %s", table_name, e)
+                _warn(f"Failed to add constraints for {table_name}: {e}")
 
         synth.fit(df)
         synthetic_data[table_name] = synth.sample(num_rows=n_rows)

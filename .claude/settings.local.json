@@ -10,7 +10,8 @@
       "Bash(uv init --no-readme)",
       "Bash(uv sync)",
       "Bash(uv python pin 3.11)",
-      "Bash(uv run python -c \":*)"
+      "Bash(uv run python -c \":*)",
+      "Bash(python:*)"
     ]
   }
 }

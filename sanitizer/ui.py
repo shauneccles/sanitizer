@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -17,11 +18,45 @@ from sanitizer.models import (
 SDTYPE_OPTIONS = ["id", "numerical", "datetime", "categorical", "boolean", "unknown"]
 ROLE_OPTIONS = [r.value for r in ColumnRole]
 
+# Directories that should never be used as input/output paths
+_BLOCKED_PATHS = {
+    "/", "C:\\", "C:\\Windows", "C:\\Windows\\System32",
+    "/etc", "/usr", "/bin", "/sbin", "/var", "/tmp",
+}
+
+
+def _validate_folder_path(path_str: str) -> Path | None:
+    """Validate a user-provided folder path. Returns resolved Path or None with st.error."""
+    if not path_str or not path_str.strip():
+        return None
+    try:
+        p = Path(path_str).resolve()
+    except (OSError, ValueError):
+        st.error(f"Invalid path: {path_str}")
+        return None
+
+    # Block path traversal and system directories
+    p_str = str(p).replace("\\", "/")
+    if any(p_str.upper() == blocked.upper().replace("\\", "/") for blocked in _BLOCKED_PATHS):
+        st.error(f"Cannot use system directory: {p}")
+        return None
+
+    return p
+
 
 def get_folder_from_args() -> str:
     """Extract folder path from CLI args (after '--' in streamlit run)."""
-    if len(sys.argv) > 1:
-        candidate = sys.argv[-1]
+    # Only consider args after '--' separator, which streamlit uses
+    args = sys.argv[1:]
+    try:
+        sep_index = args.index("--")
+        user_args = args[sep_index + 1:]
+    except ValueError:
+        # No '--' separator; take last arg if it doesn't look like a flag
+        user_args = args
+
+    if user_args:
+        candidate = user_args[-1]
         if not candidate.startswith("-"):
             return candidate
     return ""
@@ -46,6 +81,9 @@ def render_folder_selector() -> str | None:
 
 def render_table_overview(analysis: AnalysisResult):
     st.subheader("Tables Overview")
+    if not analysis.tables:
+        st.info("No tables loaded.")
+        return
     cols = st.columns(min(len(analysis.tables), 4))
     for i, (table_name, table_meta) in enumerate(analysis.tables.items()):
         col = cols[i % len(cols)]
@@ -96,7 +134,7 @@ def render_table_detail(table_name: str, analysis: AnalysisResult, df: pd.DataFr
             "Samples": st.column_config.TextColumn(disabled=True),
         },
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
     )
 
     # Sync edits back to analysis
@@ -112,8 +150,22 @@ def _sync_column_edits(table_name: str, analysis: AnalysisResult, edited: pd.Dat
         if col_name not in table_meta.columns:
             continue
         col_meta = table_meta.columns[col_name]
-        col_meta.sdtype = row["SDType"]
-        col_meta.role = ColumnRole(row["Role"])
+
+        # Validate sdtype
+        sdtype = row["SDType"]
+        if sdtype not in SDTYPE_OPTIONS:
+            st.warning(f"Invalid SDType '{sdtype}' for column '{col_name}', keeping '{col_meta.sdtype}'")
+            continue
+
+        # Validate role
+        try:
+            role = ColumnRole(row["Role"])
+        except ValueError:
+            st.warning(f"Invalid Role '{row['Role']}' for column '{col_name}', keeping '{col_meta.role.value}'")
+            continue
+
+        col_meta.sdtype = sdtype
+        col_meta.role = role
         col_meta.is_primary_key = bool(row["Primary Key"])
         col_meta.foreign_key_target = row["FK Target"] if row["FK Target"] else None
 
@@ -130,7 +182,7 @@ def _sync_column_edits(table_name: str, analysis: AnalysisResult, edited: pd.Dat
 
 def render_data_preview(table_name: str, df: pd.DataFrame):
     st.caption("Data preview (first 10 rows)")
-    st.dataframe(df.head(10), use_container_width=True, hide_index=True)
+    st.dataframe(df.head(10), width="stretch", hide_index=True)
 
 
 def render_relationships_editor(analysis: AnalysisResult):
@@ -247,19 +299,34 @@ def render_synthesis_controls():
         value=st.session_state.get("scale", 1.0),
         step=0.1,
     )
+    st.session_state.seed = st.number_input(
+        "Random seed (leave 0 for non-deterministic)",
+        min_value=0,
+        max_value=2**31 - 1,
+        value=st.session_state.get("seed", 0),
+        step=1,
+    )
     if st.button("Generate Synthetic Data", type="primary"):
         st.session_state.trigger_synthesis = True
 
 
-def render_output_section(synthetic_data: dict[str, pd.DataFrame]):
-    from sanitizer.writer import create_zip_buffer, write_single_excel_buffer
+def render_output_section(synthetic_data: dict[str, pd.DataFrame], analysis: AnalysisResult):
+    from sanitizer.writer import create_zip_buffer, dataframe_to_excel_buffer
+
+    # Extract relative dirs from analysis for preserving folder structure
+    table_relative_dirs = {
+        name: meta.relative_dir for name, meta in analysis.tables.items()
+    }
+    has_subdirs = any(d for d in table_relative_dirs.values())
 
     st.subheader("Synthetic Data Output")
 
     for table_name, df in synthetic_data.items():
-        with st.expander(f"{table_name} ({len(df)} rows)", expanded=False):
-            st.dataframe(df.head(20), use_container_width=True, hide_index=True)
-            buf = write_single_excel_buffer(df)
+        rel_dir = table_relative_dirs.get(table_name, "")
+        label = f"{rel_dir}/{table_name}" if rel_dir else table_name
+        with st.expander(f"{label} ({len(df)} rows)", expanded=False):
+            st.dataframe(df.head(20), width="stretch", hide_index=True)
+            buf = dataframe_to_excel_buffer(df)
             st.download_button(
                 f"Download {table_name}.xlsx",
                 data=buf,
@@ -269,18 +336,24 @@ def render_output_section(synthetic_data: dict[str, pd.DataFrame]):
             )
 
     st.divider()
-    zip_buf = create_zip_buffer(synthetic_data)
+    zip_buf = create_zip_buffer(synthetic_data, table_relative_dirs)
     st.download_button(
         "Download All (ZIP)",
         data=zip_buf,
         file_name="synthetic_data.zip",
         mime="application/zip",
     )
+    if has_subdirs:
+        st.caption("ZIP preserves the original subdirectory structure.")
 
     st.divider()
-    output_path = st.text_input("Save to folder", value="")
-    if output_path and st.button("Save to folder"):
-        from pathlib import Path
+    output_path_str = st.text_input("Save to folder", value="")
+    if output_path_str and st.button("Save to folder"):
         from sanitizer.writer import write_excel_files
-        paths = write_excel_files(synthetic_data, Path(output_path))
-        st.success(f"Saved {len(paths)} files to {output_path}")
+
+        output_path = _validate_folder_path(output_path_str)
+        if output_path is not None:
+            paths = write_excel_files(synthetic_data, output_path, table_relative_dirs)
+            st.success(f"Saved {len(paths)} files to {output_path}")
+            if has_subdirs:
+                st.caption("Subdirectory structure from the original folder has been preserved.")

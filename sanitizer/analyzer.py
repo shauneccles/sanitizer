@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import re
+
 import polars as pl
-import pandas as pd
 
 from sanitizer.models import (
     AnalysisResult,
@@ -123,7 +124,7 @@ def detect_dimensions(
         if col in exclude:
             continue
         dtype = df.schema[col]
-        if dtype not in (pl.Utf8, pl.String, pl.Categorical):
+        if dtype not in (pl.String, pl.Categorical):
             continue
         n_unique = df.select(pl.col(col).n_unique()).item()
         ratio = n_unique / n
@@ -171,11 +172,18 @@ def detect_dimension_groups(
 
 # ── Date constraint detection ───────────────────────────────────────────────
 
+# Match "date" or "time" only as whole word segments (e.g. "start_date" but not "mandate")
+_DATE_NAME_RE = re.compile(r"(?:^|_)(?:date|time|timestamp|datetime)(?:_|$)", re.IGNORECASE)
+
+
 def _is_date_col(df: pl.DataFrame, col: str) -> bool:
     dtype = df.schema[col]
-    return dtype in (pl.Date, pl.Datetime, pl.Duration) or (
-        "date" in col.lower() or "time" in col.lower()
-    )
+    if dtype in (pl.Date, pl.Datetime):
+        return True
+    # Only use name heuristic for string columns that might contain date strings
+    if dtype in (pl.String, pl.Categorical) and _DATE_NAME_RE.search(col):
+        return True
+    return False
 
 
 def detect_date_constraints(table_name: str, df: pl.DataFrame) -> list[DateConstraintPair]:
@@ -220,7 +228,7 @@ def detect_text_columns(
         if col in exclude:
             continue
         dtype = df.schema[col]
-        if dtype not in (pl.Utf8, pl.String):
+        if dtype not in (pl.String,):
             continue
         n_unique = df.select(pl.col(col).n_unique()).item()
         ratio = n_unique / n
@@ -296,21 +304,20 @@ def classify_column(
 
 def analyze(
     polars_dfs: dict[str, pl.DataFrame],
-    pandas_dfs: dict[str, pd.DataFrame],
     table_sources: dict[str, str],
+    table_relative_dirs: dict[str, str] | None = None,
 ) -> AnalysisResult:
     result = AnalysisResult()
 
-    # Phase 1: Detect primary keys for each table
+    # Phase 1: Detect primary keys for each table (only store when found)
     primary_keys: dict[str, str] = {}
     for table_name, df in polars_dfs.items():
         candidates = detect_primary_keys(table_name, df)
-        pk_col = candidates[0][0] if candidates else None
-        primary_keys[table_name] = pk_col  # type: ignore
+        if candidates:
+            primary_keys[table_name] = candidates[0][0]
 
     # Phase 2: Detect foreign keys across tables
-    valid_pks = {t: pk for t, pk in primary_keys.items() if pk is not None}
-    relationships = detect_foreign_keys(polars_dfs, valid_pks)
+    relationships = detect_foreign_keys(polars_dfs, primary_keys)
     result.relationships = relationships
 
     # Build FK lookup per table
@@ -345,12 +352,14 @@ def analyze(
                         break
             columns[col] = meta
 
+        rel_dirs = table_relative_dirs or {}
         result.tables[table_name] = TableMeta(
             name=table_name,
             file_path=table_sources.get(table_name, ""),
             row_count=df.height,
             columns=columns,
             primary_key=pk_col,
+            relative_dir=rel_dirs.get(table_name, ""),
         )
 
     return result
