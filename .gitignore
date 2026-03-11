@@ -8,3 +8,34 @@ wheels/
 
 # Virtual environments
 .venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test / coverage artifacts
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+test_output/
+
+# Tool caches
+.ruff_cache/
+.mypy_cache/
+
+# Logs
+logs/
+
+# Environment
+.env
+
+# User-specific Claude settings
+.claude/settings.local.json
