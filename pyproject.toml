@@ -2,6 +2,7 @@
 name = "sanitizer"
 version = "0.1.0"
 description = "Synthetic data generator with auto-detected relational metadata"
+license = "MIT"
 requires-python = ">=3.11"
 dependencies = [
     "streamlit>=1.38.0,<2",
@@ -13,6 +14,54 @@ dependencies = [
     "openpyxl>=3.1.0,<4",
     "streamlit-flow-component>=1.6.0,<2",
 ]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.11.0",
+    "prek",
+    "ty",
+    "bandit>=1.7.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "UP", "B", "SIM", "RUF", "C4", "PIE", "PT"]
+ignore = ["E501", "B905", "SIM108", "RUF012"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["sanitizer"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["PT011", "B011"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = true
+
+[tool.ty.environment]
+python-version = "3.11"
+
+[tool.ty.src]
+include = ["sanitizer", "tests", "app.py"]
+
+[tool.ty.rules]
+# Downgrade overload-matching errors to warnings — these are false positives
+# from complex third-party type stubs (numpy, streamlit, pandas).
+no-matching-overload = "warn"
+invalid-argument-type = "warn"
+
+[tool.bandit]
+exclude_dirs = ["tests"]
+skips = ["B101", "B404"]
 
 [build-system]
 requires = ["hatchling"]

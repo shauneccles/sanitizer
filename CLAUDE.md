@@ -10,16 +10,29 @@ Sanitizer is a Streamlit app that generates fully synthetic versions of Excel da
 
 ```bash
 # Install dependencies (uses uv package manager)
-uv sync
+uv sync --extra dev
 
 # Run the app
 streamlit run app.py
 
 # Run with a pre-filled folder path
 streamlit run app.py test_data
-```
 
-There are no tests or linting configured.
+# Lint
+ruff check .
+
+# Format
+ruff format .
+
+# Type check
+ty check
+
+# Run prek hooks on all files
+prek run --all-files
+
+# Run tests
+pytest --cov=sanitizer --cov-report=term-missing -v
+```
 
 ## Architecture
 
