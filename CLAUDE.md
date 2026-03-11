@@ -27,12 +27,13 @@ The app follows a four-phase pipeline: **Load → Analyze → Synthesize → Wri
 
 ### Core Modules (`sanitizer/`)
 
-- **models.py** — Dataclasses defining the pipeline's data structures: `ColumnRole` enum, `ColumnMeta`, `TableMeta`, `AnalysisResult`, `Relationship`, `DateConstraintPair`, `DimensionGroup`
-- **loader.py** — Discovers .xlsx/.xls files in a folder, reads sheets with fastexcel/polars, converts to pandas (required by SDV's datetime64[ns] expectation)
+- **models.py** — Dataclasses defining the pipeline's data structures: `ColumnRole` enum, `ColumnMeta` (with `faker_override` field), `TableMeta`, `AnalysisResult`, `Relationship`, `DateConstraintPair`, `DimensionGroup`
+- **loader.py** — Discovers .xlsx/.xls files in a folder (including subdirectories), reads sheets with fastexcel/polars, converts to pandas (required by SDV's datetime64[ns] expectation)
 - **analyzer.py** — Auto-detects primary keys (95% uniqueness threshold), foreign keys (80% overlap threshold), dimensions (adaptive cardinality thresholds), date ordering constraints, and text columns
-- **synthesizer.py** — Builds SDV metadata and constraints, chooses HMA (multi-table, ≤10 tables with relationships) or GaussianCopulaSynthesizer (per-table fallback), then post-processes text columns with Faker
+- **synthesizer.py** — Builds SDV metadata and constraints, chooses HMA (multi-table, ≤10 tables with relationships) or GaussianCopulaSynthesizer (per-table fallback), then post-processes text columns with Faker. Also provides `preview_sample()` for fast heuristic previews and `FAKER_TYPES`/`FAKER_TYPE_OPTIONS` for the UI dropdown
+- **config.py** — JSON serialization/deserialization for `AnalysisResult` and settings, enabling save/reload of analysis configs across sessions
 - **writer.py** — Exports synthetic data as individual .xlsx files, a single multi-sheet Excel buffer, or a .zip archive
-- **ui.py** — Streamlit UI managing four phases (LOAD, REVIEW, SYNTHESIZE, DONE) via `st.session_state`
+- **ui.py** — Streamlit UI managing four phases (LOAD, REVIEW, SYNTHESIZE, DONE) via `st.session_state`. Includes interactive column-level relationship graph using `streamlit-flow-component`
 
 ### Entry Point
 
@@ -42,9 +43,12 @@ The app follows a four-phase pipeline: **Load → Analyze → Synthesize → Wri
 
 - Polars for fast loading, pandas for SDV compatibility — both are maintained in parallel
 - Multi-table synthesis falls back to per-table if HMA fails
-- Faker column mapping infers column purpose from name patterns (e.g., "email" → `fake.email()`)
+- Faker column mapping infers column purpose from name patterns (e.g., "email" → `fake.email()`), with explicit `faker_override` support per column
 - Analyzer thresholds are constants at module top (`PK_UNIQUENESS_THRESHOLD`, `FK_OVERLAP_THRESHOLD`, etc.)
+- Relationship graph uses column-level nodes (not table-level) for direct column-to-column drag-and-drop linking via `streamlit-flow-component`. Header nodes are draggable to reposition table groups; column nodes are connectable but pinned relative to their header
+- `StreamlitFlowNode` constructor takes `pos=(x, y)` tuple but the returned object uses `position={"x": ..., "y": ...}` dict — important when reading back node positions after render
+- Heuristic preview (`preview_sample()`) generates structurally plausible data in <50ms without SDV fitting, used for real-time feedback in the column editor
 
 ## Dependencies
 
-Python 3.14. Key libraries: streamlit, polars, fastexcel, pandas, sdv, faker, openpyxl. Build system: hatchling.
+Python 3.11+. Key libraries: streamlit, polars, fastexcel, pandas, sdv, faker, openpyxl, streamlit-flow-component. Build system: hatchling.
