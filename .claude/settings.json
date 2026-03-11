@@ -4,7 +4,14 @@
       "WebFetch(domain:pypi.org)",
       "WebFetch(domain:raw.githubusercontent.com)",
       "Bash(uv run:*)",
-      "Bash(pip show:*)"
+      "Bash(pip show:*)",
+      "Bash(grep -n \"^import\\\\|^from\" /d/sanitizer/sanitizer/*.py)",
+      "Bash(grep -rn \"C:\\\\|/etc\\\\|/usr\\\\|/bin\\\\|/var\\\\|/tmp\" /d/sanitizer/sanitizer/*.py --include=\"*.py\")",
+      "Bash(grep -rn \"except Exception\\\\|except:\\\\|except BaseException\" /d/sanitizer/sanitizer/*.py)",
+      "Bash(grep -n \"logger\\\\.\" /d/sanitizer/sanitizer/*.py)",
+      "Bash(grep -rn \"sdv\\\\.\" /d/sanitizer/sanitizer/*.py)",
+      "Bash(ls /d/sanitizer/*.py)",
+      "Bash(grep -n \"from sanitizer\\\\.\" /d/sanitizer/sanitizer/*.py)"
     ]
   }
 }

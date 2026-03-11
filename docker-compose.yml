@@ -1,0 +1,21 @@
+services:
+  sanitizer:
+    build: .
+    ports:
+      - "8501:8501"
+    environment:
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - STREAMLIT_ADDRESS=0.0.0.0
+    volumes:
+      - ./data:/app/data:ro
+      - ./logs:/app/logs
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G

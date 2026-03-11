@@ -1,30 +1,37 @@
 from __future__ import annotations
 
 import logging
+import os
 
 import streamlit as st
 
-from sanitizer.loader import load_all
 from sanitizer.analyzer import analyze
+from sanitizer.loader import load_all
+from sanitizer.logging_config import configure_logging
 from sanitizer.synthesizer import synthesize
 from sanitizer.ui import (
     _validate_folder_path,
     init_session_state,
+    render_analysis_thresholds,
     render_config_download,
     render_config_upload,
-    render_folder_selector,
-    render_table_overview,
-    render_table_detail,
     render_data_preview,
-    render_synthetic_preview,
-    render_relationships_editor,
     render_date_constraints_editor,
     render_dimension_groups_editor,
-    render_synthesis_controls,
+    render_folder_selector,
     render_output_section,
+    render_phase_indicator,
+    render_relationships_editor,
+    render_synthesis_controls,
+    render_synthetic_preview,
+    render_table_detail,
+    render_table_overview,
+    render_validation_report,
 )
+from sanitizer.validator import validate_all
 
-logging.basicConfig(level=logging.WARNING, format="%(name)s: %(message)s")
+configure_logging()
+logger = logging.getLogger(__name__)
 
 
 def main():
@@ -39,12 +46,33 @@ def main():
     if "phase" not in st.session_state:
         st.session_state.phase = "load"
 
+    # Sidebar: clear all data button (available from any phase)
+    with st.sidebar:
+        if st.button("Clear All Data", type="secondary"):
+            for key in (
+                "analysis",
+                "pandas_dfs",
+                "synthetic_data",
+                "validation_result",
+            ):
+                st.session_state.pop(key, None)
+            st.session_state.phase = "load"
+            import gc
+
+            gc.collect()
+            st.rerun()
+
+    render_phase_indicator()
+    st.divider()
+
     # ── LOAD ────────────────────────────────────────────────────────────────
     if st.session_state.phase == "load":
         folder_path = render_folder_selector()
 
         st.divider()
         saved_analysis, saved_settings = render_config_upload()
+
+        render_analysis_thresholds()
 
         if folder_path and st.button("Load & Analyze", type="primary"):
             folder = _validate_folder_path(folder_path)
@@ -56,7 +84,9 @@ def main():
 
             with st.spinner("Loading Excel files (searching subdirectories)..."):
                 try:
-                    polars_dfs, pandas_dfs, table_sources, table_relative_dirs = load_all(folder)
+                    polars_dfs, pandas_dfs, table_sources, table_relative_dirs = (
+                        load_all(folder)
+                    )
                 except Exception as e:
                     st.error(f"Failed to load: {e}")
                     return
@@ -78,7 +108,14 @@ def main():
                         f"Analyzing {len(missing_from_config)} new table(s) "
                         f"not in config: {', '.join(sorted(missing_from_config))}"
                     )
-                    fresh = analyze(polars_dfs, table_sources, table_relative_dirs)
+                    fresh = analyze(
+                        polars_dfs,
+                        table_sources,
+                        table_relative_dirs,
+                        pk_threshold=st.session_state.get("pk_threshold"),
+                        fk_threshold=st.session_state.get("fk_threshold"),
+                        dim_threshold=st.session_state.get("dim_threshold"),
+                    )
                     for t in missing_from_config:
                         saved_analysis.tables[t] = fresh.tables[t]
                     # Keep fresh relationships/constraints for new tables too
@@ -87,7 +124,12 @@ def main():
                         for r in saved_analysis.relationships
                     }
                     for r in fresh.relationships:
-                        key = (r.parent_table, r.child_table, r.parent_column, r.child_column)
+                        key = (
+                            r.parent_table,
+                            r.child_table,
+                            r.parent_column,
+                            r.child_column,
+                        )
                         if key not in existing_rels:
                             saved_analysis.relationships.append(r)
                     for dc in fresh.date_constraints:
@@ -101,27 +143,32 @@ def main():
                 extra = config_tables - loaded_tables
                 if extra:
                     st.warning(
-                        f"Config tables not found in data (skipped): "
-                        f"{', '.join(sorted(extra))}"
+                        f"Config tables not found in data (skipped): {', '.join(sorted(extra))}"
                     )
                     for t in extra:
                         del saved_analysis.tables[t]
                     saved_analysis.relationships = [
-                        r for r in saved_analysis.relationships
-                        if r.parent_table in loaded_tables and r.child_table in loaded_tables
+                        r
+                        for r in saved_analysis.relationships
+                        if r.parent_table in loaded_tables
+                        and r.child_table in loaded_tables
                     ]
                     saved_analysis.date_constraints = [
-                        dc for dc in saved_analysis.date_constraints
+                        dc
+                        for dc in saved_analysis.date_constraints
                         if dc.table_name in loaded_tables
                     ]
                     saved_analysis.dimension_groups = [
-                        dg for dg in saved_analysis.dimension_groups
+                        dg
+                        for dg in saved_analysis.dimension_groups
                         if dg.table_name in loaded_tables
                     ]
 
                 # Update relative dirs from the actual loaded data
                 for t in saved_analysis.tables:
-                    saved_analysis.tables[t].relative_dir = table_relative_dirs.get(t, "")
+                    saved_analysis.tables[t].relative_dir = table_relative_dirs.get(
+                        t, ""
+                    )
 
                 analysis = saved_analysis
 
@@ -129,9 +176,25 @@ def main():
                 if saved_settings:
                     st.session_state.scale = saved_settings.get("scale", 1.0)
                     st.session_state.seed = saved_settings.get("seed", 0)
+                    st.session_state.faker_locale = saved_settings.get(
+                        "faker_locale", "en_US"
+                    )
+                    if "pk_threshold" in saved_settings:
+                        st.session_state.pk_threshold = saved_settings["pk_threshold"]
+                    if "fk_threshold" in saved_settings:
+                        st.session_state.fk_threshold = saved_settings["fk_threshold"]
+                    if "dim_threshold" in saved_settings:
+                        st.session_state.dim_threshold = saved_settings["dim_threshold"]
             else:
                 with st.spinner("Analyzing metadata..."):
-                    analysis = analyze(polars_dfs, table_sources, table_relative_dirs)
+                    analysis = analyze(
+                        polars_dfs,
+                        table_sources,
+                        table_relative_dirs,
+                        pk_threshold=st.session_state.get("pk_threshold"),
+                        fk_threshold=st.session_state.get("fk_threshold"),
+                        dim_threshold=st.session_state.get("dim_threshold"),
+                    )
 
             init_session_state(analysis, pandas_dfs)
             st.session_state.phase = "review"
@@ -185,7 +248,14 @@ def main():
     # ── SYNTHESIZE ──────────────────────────────────────────────────────────
     if st.session_state.phase == "synthesize":
         analysis = st.session_state.analysis
-        pandas_dfs = st.session_state.pandas_dfs
+        # Extract original data into local var and clear from session state early
+        pandas_dfs = st.session_state.pop("pandas_dfs", None)
+        if pandas_dfs is None:
+            st.error("Original data is no longer available. Please reload.")
+            if st.button("Back to Load"):
+                st.session_state.phase = "load"
+                st.rerun()
+            return
         scale = st.session_state.get("scale", 1.0)
         seed_val = st.session_state.get("seed", 0)
         seed = seed_val if seed_val != 0 else None
@@ -199,23 +269,45 @@ def main():
         def warning_callback(msg: str):
             warning_container.warning(msg)
 
+        locale = st.session_state.get("faker_locale")
+        method = st.session_state.get("synthesis_method", "auto")
+        anon_dims = st.session_state.get("anonymize_dimensions", False)
+
         try:
             synthetic_data = synthesize(
                 analysis=analysis,
                 pandas_dfs=pandas_dfs,
                 scale=scale,
                 seed=seed,
+                locale=locale,
+                method=method,
+                anonymize_dimensions=anon_dims,
                 progress_callback=progress_callback,
                 warning_callback=warning_callback,
             )
+            progress_callback(0.95, "Validating synthetic data...")
+            validation = validate_all(analysis, synthetic_data, pandas_dfs, scale)
             st.session_state.synthetic_data = synthetic_data
+            st.session_state.validation_result = validation
+            # Release local reference and force GC
+            del pandas_dfs
+            import gc
+
+            gc.collect()
             st.session_state.phase = "done"
             st.rerun()
         except Exception as e:
             st.error(f"Synthesis failed: {e}")
-            with st.expander("Show traceback (debug)"):
+            logger.exception("Synthesis failed")
+            _debug = (
+                os.environ.get("SANITIZER_DEBUG", "").lower() in ("1", "true")
+                or os.environ.get("LOG_LEVEL", "").upper() == "DEBUG"
+            )
+            if _debug:
                 import traceback
-                st.code(traceback.format_exc())
+
+                with st.expander("Show traceback (debug)"):
+                    st.code(traceback.format_exc())
             if st.button("Back to Review"):
                 st.session_state.phase = "review"
                 st.rerun()
@@ -224,16 +316,25 @@ def main():
     # ── DONE ────────────────────────────────────────────────────────────────
     if st.session_state.phase == "done":
         st.success("Synthetic data generated successfully!")
-        render_output_section(st.session_state.synthetic_data, st.session_state.analysis)
+        render_validation_report()
+        st.divider()
+        render_output_section(
+            st.session_state.synthetic_data, st.session_state.analysis
+        )
 
         st.divider()
         col1, col2 = st.columns(2)
         with col1:
             render_config_download(st.session_state.analysis, key_suffix="_done")
         with col2:
-            if st.button("Back to Review"):
-                st.session_state.phase = "review"
-                st.session_state.synthetic_data = None
+            if st.button("Start Over"):
+                # Original data was cleared during synthesis — must reload
+                for key in ("analysis", "synthetic_data", "validation_result"):
+                    st.session_state.pop(key, None)
+                st.session_state.phase = "load"
+                import gc
+
+                gc.collect()
                 st.rerun()
 
 

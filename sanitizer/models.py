@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 
-class ColumnRole(str, Enum):
+class ColumnRole(StrEnum):
     PRIMARY_KEY = "primary_key"
     FOREIGN_KEY = "foreign_key"
     DIMENSION = "dimension"
@@ -13,6 +13,12 @@ class ColumnRole(str, Enum):
     TEXT = "text"
     DATE = "date"
     OTHER = "other"
+
+
+class SensitivityLevel(StrEnum):
+    NONE = "none"
+    LOW = "low"
+    HIGH = "high"
 
 
 @dataclass
@@ -24,8 +30,11 @@ class ColumnMeta:
     foreign_key_target: str | None = None  # "parent_table.column" if FK
     uniqueness_ratio: float = 0.0
     datetime_format: str | None = None  # e.g. "%Y-%m-%d" for SDV
-    faker_override: str | None = None  # explicit Faker provider key, e.g. "email", "name"
+    faker_override: str | None = (
+        None  # explicit Faker provider key, e.g. "email", "name"
+    )
     sample_values: list[Any] = field(default_factory=list)
+    sensitivity: SensitivityLevel = SensitivityLevel.NONE
 
 
 @dataclass
@@ -60,7 +69,9 @@ class TableMeta:
     row_count: int
     columns: dict[str, ColumnMeta] = field(default_factory=dict)
     primary_key: str | None = None
-    relative_dir: str = ""  # subdirectory relative to the root input folder (posix style)
+    relative_dir: str = (
+        ""  # subdirectory relative to the root input folder (posix style)
+    )
 
 
 @dataclass
