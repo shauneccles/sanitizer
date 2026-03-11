@@ -2,6 +2,7 @@
 
 __all__ = [
     "analyzer",
+    "config",
     "loader",
     "models",
     "synthesizer",

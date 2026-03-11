@@ -11,7 +11,8 @@
       "Bash(uv sync)",
       "Bash(uv python pin 3.11)",
       "Bash(uv run python -c \":*)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(uv pip:*)"
     ]
   }
 }

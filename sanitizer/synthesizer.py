@@ -33,8 +33,35 @@ _FAKER_DISPATCH: list[tuple[list[str], Callable[[], str]]] = [
     ),
 ]
 
+# Named Faker generators for the override dropdown
+FAKER_TYPES: dict[str, Callable[[], str]] = {
+    "name": fake.name,
+    "first_name": fake.first_name,
+    "last_name": fake.last_name,
+    "email": fake.email,
+    "phone": fake.phone_number,
+    "address": fake.address,
+    "city": fake.city,
+    "company": fake.company,
+    "url": fake.url,
+    "sentence": lambda: fake.sentence(nb_words=10),
+    "paragraph": fake.paragraph,
+    "uuid": lambda: fake.uuid4(),
+    "date": lambda: fake.date(),
+    "country": fake.country,
+    "job": fake.job,
+    "zipcode": fake.zipcode,
+}
 
-def _faker_for_column(col_name: str) -> Callable[[], str]:
+# Options list for the UI dropdown
+FAKER_TYPE_OPTIONS: list[str] = ["auto"] + sorted(FAKER_TYPES.keys())
+
+
+def _faker_for_column(col_name: str, override: str | None = None) -> Callable[[], str]:
+    # Check explicit override first
+    if override and override != "auto" and override in FAKER_TYPES:
+        return FAKER_TYPES[override]
+
     col_lower = col_name.lower()
     # Split on underscores/spaces to get word segments for matching
     segments = set(col_lower.replace(" ", "_").split("_"))
@@ -48,6 +75,101 @@ def _faker_for_column(col_name: str) -> Callable[[], str]:
     return lambda: fake.sentence(nb_words=6)
 
 
+def preview_sample(
+    table_name: str,
+    analysis: AnalysisResult,
+    pandas_dfs: dict[str, pd.DataFrame],
+    n_rows: int = 10,
+) -> pd.DataFrame:
+    """Generate a fast heuristic preview of synthetic data (no SDV fitting).
+
+    Produces structurally plausible rows in <50ms by sampling from source
+    data ranges and using Faker for text columns.
+    """
+    table_meta = analysis.tables[table_name]
+    source_df = pandas_dfs.get(table_name, pd.DataFrame())
+    result: dict[str, list] = {}
+
+    for col_name, col_meta in table_meta.columns.items():
+        role = col_meta.role
+        sdtype = col_meta.sdtype
+        source_col = source_df[col_name] if col_name in source_df.columns else None
+
+        if role == ColumnRole.PRIMARY_KEY or col_meta.is_primary_key:
+            # Sequential IDs
+            if source_col is not None and pd.api.types.is_string_dtype(source_col):
+                result[col_name] = [fake.uuid4() for _ in range(n_rows)]
+            else:
+                result[col_name] = list(range(1, n_rows + 1))
+
+        elif role == ColumnRole.FOREIGN_KEY and col_meta.foreign_key_target:
+            # Sample from parent PK
+            parts = col_meta.foreign_key_target.split(".", 1)
+            if len(parts) == 2:
+                parent_table, parent_col = parts
+                parent_df = pandas_dfs.get(parent_table)
+                if parent_df is not None and parent_col in parent_df.columns:
+                    parent_vals = parent_df[parent_col].dropna().values
+                    if len(parent_vals) > 0:
+                        result[col_name] = list(np.random.choice(parent_vals, size=n_rows, replace=True))
+                        continue
+            # Fallback: sample from own column
+            if source_col is not None and not source_col.dropna().empty:
+                result[col_name] = list(source_col.dropna().sample(n=n_rows, replace=True).values)
+            else:
+                result[col_name] = [None] * n_rows
+
+        elif role == ColumnRole.TEXT:
+            generator = _faker_for_column(col_name, col_meta.faker_override)
+            result[col_name] = [generator() for _ in range(n_rows)]
+
+        elif sdtype == "numerical" or role == ColumnRole.MEASURE:
+            if source_col is not None and not source_col.dropna().empty:
+                col_min = float(source_col.min())
+                col_max = float(source_col.max())
+                if pd.api.types.is_integer_dtype(source_col):
+                    result[col_name] = list(np.random.randint(int(col_min), max(int(col_max) + 1, int(col_min) + 1), size=n_rows))
+                else:
+                    result[col_name] = list(np.round(np.random.uniform(col_min, col_max, size=n_rows), 2))
+            else:
+                result[col_name] = list(np.random.uniform(0, 100, size=n_rows))
+
+        elif sdtype == "datetime" or role == ColumnRole.DATE:
+            if source_col is not None and not source_col.dropna().empty:
+                try:
+                    dates = pd.to_datetime(source_col.dropna())
+                    start = dates.min()
+                    end = dates.max()
+                    delta = (end - start).total_seconds()
+                    if delta <= 0:
+                        delta = 86400  # 1 day
+                    random_offsets = np.random.uniform(0, delta, size=n_rows)
+                    result[col_name] = [start + pd.Timedelta(seconds=s) for s in random_offsets]
+                except Exception:
+                    result[col_name] = [fake.date_time() for _ in range(n_rows)]
+            else:
+                result[col_name] = [fake.date_time() for _ in range(n_rows)]
+
+        elif sdtype == "boolean":
+            result[col_name] = list(np.random.choice([True, False], size=n_rows))
+
+        elif sdtype == "categorical" or role == ColumnRole.DIMENSION:
+            if source_col is not None and not source_col.dropna().empty:
+                unique_vals = source_col.dropna().unique()
+                result[col_name] = list(np.random.choice(unique_vals, size=n_rows, replace=True))
+            else:
+                result[col_name] = [f"cat_{i}" for i in range(n_rows)]
+
+        else:
+            # Fallback: sample from source or generate placeholders
+            if source_col is not None and not source_col.dropna().empty:
+                result[col_name] = list(source_col.dropna().sample(n=n_rows, replace=True).values)
+            else:
+                result[col_name] = [None] * n_rows
+
+    return pd.DataFrame(result)
+
+
 def _prepare_clean_data(
     pandas_dfs: dict[str, pd.DataFrame],
     text_columns_by_table: dict[str, list[str]],
@@ -55,7 +177,76 @@ def _prepare_clean_data(
     clean_data = {}
     for table_name, df in pandas_dfs.items():
         drop_cols = text_columns_by_table.get(table_name, [])
-        clean_data[table_name] = df.drop(columns=drop_cols, errors="ignore")
+        clean_data[table_name] = df.drop(columns=drop_cols, errors="ignore").copy()
+    return clean_data
+
+
+def _align_fk_types(
+    clean_data: dict[str, pd.DataFrame],
+    analysis: AnalysisResult,
+    warn: Callable[[str], None],
+) -> dict[str, pd.DataFrame]:
+    """Cast FK columns to match their parent PK column dtype so SDV accepts the relationship."""
+    for rel in analysis.relationships:
+        parent, child = rel.parent_table, rel.child_table
+        pk_col, fk_col = rel.parent_column, rel.child_column
+
+        if parent not in clean_data or child not in clean_data:
+            continue
+        if pk_col not in clean_data[parent].columns or fk_col not in clean_data[child].columns:
+            continue
+
+        pk_dtype = clean_data[parent][pk_col].dtype
+        fk_dtype = clean_data[child][fk_col].dtype
+
+        if pk_dtype != fk_dtype:
+            try:
+                clean_data[child][fk_col] = clean_data[child][fk_col].astype(pk_dtype)
+                warn(
+                    f"Cast {child}.{fk_col} from {fk_dtype} to {pk_dtype} "
+                    f"to match parent PK type"
+                )
+            except (ValueError, TypeError) as e:
+                warn(
+                    f"Cannot align FK type {child}.{fk_col} ({fk_dtype}) "
+                    f"with PK {parent}.{pk_col} ({pk_dtype}): {e}"
+                )
+
+    return clean_data
+
+
+def _fix_date_constraint_violations(
+    clean_data: dict[str, pd.DataFrame],
+    analysis: AnalysisResult,
+    warn: Callable[[str], None],
+) -> dict[str, pd.DataFrame]:
+    """Swap low/high values on rows that violate date inequality constraints.
+
+    SDV requires zero violations. The analyzer allows 2% tolerance for
+    detection, so we fix the small number of violating rows here.
+    """
+    for pair in analysis.date_constraints:
+        table_name = pair.table_name
+        if table_name not in clean_data:
+            continue
+        df = clean_data[table_name]
+        low, high = pair.low_column, pair.high_column
+        if low not in df.columns or high not in df.columns:
+            continue
+
+        mask = df[low].notna() & df[high].notna() & (df[low] > df[high])
+        n_violations = int(mask.sum())
+        if n_violations > 0:
+            # Swap the two columns on violating rows so low <= high
+            low_vals = df.loc[mask, low].copy()
+            df.loc[mask, low] = df.loc[mask, high]
+            df.loc[mask, high] = low_vals
+            clean_data[table_name] = df
+            warn(
+                f"Fixed {n_violations} date constraint violation(s) in "
+                f"{table_name}: swapped {low} / {high} on violating rows"
+            )
+
     return clean_data
 
 
@@ -170,7 +361,7 @@ def postprocess_text_columns(
         for col_name, col_meta in table_meta.columns.items():
             if col_meta.role != ColumnRole.TEXT:
                 continue
-            generator = _faker_for_column(col_name)
+            generator = _faker_for_column(col_name, col_meta.faker_override)
             df[col_name] = [generator() for _ in range(len(df))]
         synthetic_data[table_name] = df
     return synthetic_data
@@ -204,7 +395,13 @@ def synthesize(
     _progress(0.08, "Preparing data...")
     clean_data = _prepare_clean_data(pandas_dfs, text_columns_by_table)
 
-    _progress(0.10, "Building SDV metadata...")
+    _progress(0.09, "Aligning FK column types...")
+    clean_data = _align_fk_types(clean_data, analysis, _warn)
+
+    _progress(0.10, "Fixing date constraint violations...")
+    clean_data = _fix_date_constraint_violations(clean_data, analysis, _warn)
+
+    _progress(0.12, "Building SDV metadata...")
     metadata = build_sdv_metadata(analysis, clean_data, _warn)
 
     _progress(0.15, "Building constraints...")

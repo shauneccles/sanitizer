@@ -24,6 +24,7 @@ class ColumnMeta:
     foreign_key_target: str | None = None  # "parent_table.column" if FK
     uniqueness_ratio: float = 0.0
     datetime_format: str | None = None  # e.g. "%Y-%m-%d" for SDV
+    faker_override: str | None = None  # explicit Faker provider key, e.g. "email", "name"
     sample_values: list[Any] = field(default_factory=list)
 
 

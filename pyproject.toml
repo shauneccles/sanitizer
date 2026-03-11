@@ -11,6 +11,7 @@ dependencies = [
     "sdv>=1.17.0,<2",
     "faker>=28.0.0,<40",
     "openpyxl>=3.1.0,<4",
+    "streamlit-flow-component>=1.6.0,<2",
 ]
 
 [build-system]
