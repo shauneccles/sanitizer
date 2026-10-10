@@ -3,7 +3,7 @@ FROM python:3.11-slim-bookworm
 WORKDIR /app
 
 # Install uv for fast dependency management
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:latest@sha256:cdc6093146eb3ff6a40107b38f008b789e050e77ad87865e381d9917da55a168 /uv /usr/local/bin/uv
 
 # Copy project files
 COPY pyproject.toml uv.lock* ./
